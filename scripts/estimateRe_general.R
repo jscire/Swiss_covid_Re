@@ -335,7 +335,7 @@ makePlotFigure2 <- function(meltData, dataType="confirmed", windowLength=3) {
     coord_cartesian(ylim=c(0,4)) +
     # scale_y_continuous(limits = c(0, maxYscale)) +
     xlab("") + 
-    ylab("Reproduction number") + 
+    ylab("Reproductive number") + 
     scale_colour_discrete(name  ="Method",
                           breaks=c("Cori", "WallingaTeunis"),
                           labels = expression(R(t), R[c](t))) +
@@ -426,7 +426,7 @@ makePlotFigure3 <- function(meltData, windowLength=3) {
                         breaks=c("confirmed", "hospitalized_FH", "deaths"),
                         name  ="Data source", 
                         aesthetics = c("colour", "fill")) +
-    ylab("Re") +
+    ylab("Reproductive number") +
     xlab("") +
     theme_bw() +
     theme(
