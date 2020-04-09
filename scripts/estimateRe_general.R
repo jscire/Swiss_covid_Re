@@ -11,6 +11,7 @@ library(reshape)
 library(ggpubr)
 library(wesanderson)
 
+### Help function for plotting
 gg_color <- function(n) {
   
   hues = seq(15, 375, length = n + 1)
@@ -19,7 +20,16 @@ gg_color <- function(n) {
   
 }
 
-## assumes that entry data "cumulDataVector" is either given, or has an NA, for all days of the calendar (no purely missing entry in the time series)
+
+### Function made to account for missing entries in data
+## 
+## Makes linear interpolation of missing values
+## 
+## For dates after 'startDate' if two consecutive reports of cumulative cases are equal, replaces the second one by an interpolation with the entry from the previous and next day
+## This is done to account for days when the confirmed case data was not updated
+##  
+## The function assumes that entry data "cumulDataVector" is either given, 
+## or has an NA, for all days of the calendar (no day is skipped entirely)
 fillInMissingCumulativeData <- function(dates, cumulDataVector, startDate="2020-03-12"){
   
   if(sum(is.na(cumulDataVector)) > 0 & sum(!is.na(cumulDataVector)) > 1) {
@@ -27,7 +37,7 @@ fillInMissingCumulativeData <- function(dates, cumulDataVector, startDate="2020-
     cumulDataVector <- na.omit(cumulDataVector)
     
     interpolated_cases <- floor(approx(known_dates, cumulDataVector, xout = dates)$y) 
-  } else {
+  } else { # no missing data, no interpolation needed
     interpolated_cases <- cumulDataVector
   }
   
@@ -43,13 +53,15 @@ fillInMissingCumulativeData <- function(dates, cumulDataVector, startDate="2020-
   return(interpolated_cases)
 }
 
+## Get incidence data from cumulative counts data and restructure dataframe
+## Any data after 'stoppingDate' is excluded
 meltCumulativeData <- function(rawData, dataType, stoppingDate = as.Date("2020-04-01")) {
   
   cumulData <- rawData
   cumulData$Date <- ymd(cumulData$Date)
 
   cumulData <- cumulData[cumulData$Date <= stoppingDate, ]
-  cumulData <-cbind(Date=cumulData$Date, as.data.frame(apply(cumulData[,-1, drop=F], 2 , function(x) {fillInMissingCumulativeData(cumulData$Date, x)})))
+  cumulData <- cbind(Date=cumulData$Date, as.data.frame(apply(cumulData[,-1, drop=F], 2 , function(x) {fillInMissingCumulativeData(cumulData$Date, x)})))
   
   incidenceData <- as.data.frame(apply(cumulData[,-1, drop=F], 2, function(x) {  incidence <- x - c(0, x[1:(length(x)-1)]) ; return(incidence)}))
   incidenceData <- cbind(Date=cumulData$Date, incidenceData)
@@ -68,7 +80,7 @@ meltCumulativeData <- function(rawData, dataType, stoppingDate = as.Date("2020-0
   return(rbind(cumulData, incidenceData))
 }
 
-# data aggregated by Daniel Probst 
+## Fetch data from openZH via Daniel Probst's repo
 getSwissDataFromOpenZH <- function(stopAfter = as.Date("2020-04-01")) {
   
   countTypes <- list("confirmed", "deaths")
@@ -92,13 +104,15 @@ getSwissDataFromOpenZH <- function(stopAfter = as.Date("2020-04-01")) {
   return(data)
 }
 
-getHospitalData <- function(region="BS", basePathToCSV="./data/Hospital_cases_") {
+## Include hospitalization counts from local csv files
+getHospitalData <- function(region="BS", basePathToCSV="../data/Hospital_cases_") {
   filePath <- paste0(basePathToCSV, region, ".csv")
   cumData <- read_csv(filePath)
   cumData <- cumData[,c(1,3)]
   return(meltCumulativeData(cumData, "hospitalized_FH"))
 }
 
+## Combine openZH data with hospitalization data
 getAllSwissData <- function(stoppingAfter = as.Date("2020-04-01")){
   openZHData <- getSwissDataFromOpenZH(stopAfter=stoppingAfter)
   hospitalData <- rbind(getHospitalData("BS"),
@@ -107,6 +121,14 @@ getAllSwissData <- function(stoppingAfter = as.Date("2020-04-01")){
   return(rbind(openZHData, hospitalData))
 }
 
+### Apply EpiEstim R estimation method to 'incidenceData' timeseries with 'dates' the dates associated
+##
+## 'estimateOffsetting' is the number of days the estimates are to be shifted towards the past (to account for delay between infection and testing/hospitalization/death..)
+## 'ledtTruncation' is the number of days of estimates that should be ignored at the start of the time series
+## 'method' takes value either 'Cori' or  'WallingaTeunis'. 'Cori' is the classic EpiEstim R(t) method, 'WallingaTeunis' is the method by Wallinga and Teunis (also implemented in EpiEstim)
+## 'minimumCumul' is the minimum cumulative count the incidence data needs to reach before the first Re estimate is attempted (if too low, EpiEstim can crash)
+## 'windowLength' is the size of the sliding window used in EpiEstim
+## 'mean_si' and 'std_si' are the mean and SD of the serial interval distribution used by EpiEstim
 estimateRe <- function(dates, incidenceData, estimateOffsetting = 10, rightTruncation=0, leftTruncation = 5, method="Cori", minimumCumul = 5, windowLength= 4, mean_si = 4.8, std_si  =2.3) {
   
   ## First, remove missing data at beginning of series
@@ -223,9 +245,13 @@ estimateRe <- function(dates, incidenceData, estimateOffsetting = 10, rightTrunc
   return(result)
 }
 
+## Perform R(t) estimations with EpiEstim on each 'region' of the data, with each 'method' and on each 'data_type'
+## 'region' is the geographical region
+## 'data_type' can be 'confirmed' for confirmed cases, 'deaths' for fatalities, 'hospitalized_FH' for hospitalization data directly from hospitals (not via openZH here)
 doAllReEstimations <- function(data, slidingWindow=3 ,methods=c("Cori", "WallingaTeunis")) {
-# doAllReEstimations <- function(data, slidingWindow=3 ,methods=c("Cori")) {
   
+  ## Input number of days estimates should be offset for each data type and each estimation method
+  ## For instance, estimates based on confirmed cases are shifted to the past by 10 days for 'Cori' estimates and by 5 days for Wallinga-Teunis estimates
   delaysCori <- c(10, 20, 8) 
   names(delaysCori) <- c("confirmed", "deaths", "hospitalized_FH")
   delaysWT <- c(5, 15, 3) 
@@ -261,6 +287,77 @@ doAllReEstimations <- function(data, slidingWindow=3 ,methods=c("Cori", "Walling
     }
   }
   return(rbind(data, fullResults))
+}
+
+
+
+### Plotting functions
+makePlotFigure2 <- function(meltData, dataType="confirmed", windowLength=3) {
+  
+  meltData <- subset(meltData, meltData$data_type == dataType)
+  castData <- cast(meltData)
+  castData$estimated <- !is.na(castData$estimate_type)
+  
+  ### Ten of the eleven cantons with highest absolute numbers of cases, excluding Graubünden because sparse data in that case.
+  dataCases <- subset(castData, castData$estimated==F & castData$region %in% c("VD", "GE", "TI", "ZH", "VS", "BE", "BS", "BL", "AG","FR", "CH"))
+  estimates <- subset(castData, castData$estimated==T & castData$region %in% c("VD", "GE", "TI", "ZH", "VS", "BE", "BS", "BL", "AG","FR", "CH"))
+  
+  pCases <- ggplot(dataCases, aes(x=date)) + 
+    facet_grid(region ~.) +
+    geom_line(aes(y = cumul), color = "black") + 
+    geom_bar(aes(y = incidence), color = "black", stat = "identity", width=0.5) + 
+    scale_x_date(date_breaks = "3 days", 
+                 date_labels = '%b\n%d',
+                 limits = c(as.Date("2020-02-26"), as.Date("2020-04-01"))) + 
+    scale_y_log10() + 
+    ylab("Cumulative (line) and daily (bars) number of confirmed cases") + 
+    xlab("") +
+    theme_bw() + 
+    theme(
+      strip.background = element_blank(),
+      strip.text.y = element_blank(),
+      axis.text.y= element_text(size=12),
+      axis.text.x= element_text(size=11),
+      axis.title.y =  element_text(size=17)
+    )
+  
+  pRe <- ggplot(estimates, aes(x=date)) + 
+    facet_grid(region ~.) +
+    geom_ribbon(aes(ymin=R_lowHPD,ymax=R_highHPD, group=estimate_type, color=estimate_type, fill=estimate_type),alpha=0.3) + 
+    geom_line(aes(y = R_mean, group=estimate_type, color=estimate_type)) +
+    geom_hline(yintercept = 1, linetype="dashed") + 
+    geom_vline(xintercept = c(as.Date("2020-03-14"), as.Date("2020-03-17"), as.Date("2020-03-20")), linetype="dotted") + 
+    geom_vline(xintercept = c(as.Date("2020-03-07")), linetype="dashed") + 
+    annotate("rect", xmin=as.Date("2020-03-14"), xmax=as.Date("2020-03-17"), ymin=-1, ymax=Inf, alpha=0.45, fill="grey") + 
+    scale_x_date(date_breaks = "2 days", 
+                 date_labels = '%b\n%d',
+                 limits = c(as.Date("2020-03-06"), as.Date("2020-03-21"))) + 
+    coord_cartesian(ylim=c(0,4)) +
+    # scale_y_continuous(limits = c(0, maxYscale)) +
+    xlab("") + 
+    ylab("Reproduction number") + 
+    scale_colour_discrete(name  ="Method",
+                          breaks=c("Cori", "WallingaTeunis"),
+                          labels = expression(R(t), R[c](t))) +
+    scale_fill_discrete(name  ="Method",
+                        breaks=c("Cori", "WallingaTeunis"),
+                        labels = expression(R(t), R[c](t))) +
+    theme_bw() + 
+    theme(
+      strip.background = element_blank(),
+      strip.text.y = element_text(size=16),
+      axis.text.y= element_text(size=12),
+      axis.text.x= element_text(size=11),
+      axis.title.y =  element_text(size=17),
+      legend.title = element_text(size=14),
+      legend.text = element_text(size=12)
+    )
+  
+  ggarrange(pCases, pRe, labels = c("A", "B"),
+            font.label = list(size = 18),
+            common.legend = TRUE, legend = "right")
+  plotPath <- paste0("../plots/Fig2_Cases_Re_", windowLength, "_day_window_", gsub("-","", Sys.Date()), ".png")
+  ggsave(plotPath, width = 28, height = 40, units = "cm")
 }
 
 makePlotFigure3 <- function(meltData, windowLength=3) {
@@ -344,78 +441,11 @@ makePlotFigure3 <- function(meltData, windowLength=3) {
   ggarrange(pCases, pRe, labels = c("A", "B"),
             font.label = list(size = 18),
             common.legend = TRUE, legend = "right")
-  plotPath <- paste0("./Fig3_Compare_Cases_Re_", windowLength, "_day_window.png")
+  plotPath <- paste0("../plots/Fig3_Compare_Cases_Re_", windowLength, "_day_window.png")
   ggsave(plotPath, width = 28, height = 20, units = "cm")
 }
 
-makePlotFigure2 <- function(meltData, dataType="confirmed", windowLength=3) {
-  
-  meltData <- subset(meltData, meltData$data_type == dataType)
-  castData <- cast(meltData)
-  castData$estimated <- !is.na(castData$estimate_type)
-  
-  ### Ten of the eleven cantons with highest absolute numbers of cases, excluding Graubünden because sparse data in that case.
-  dataCases <- subset(castData, castData$estimated==F & castData$region %in% c("VD", "GE", "TI", "ZH", "VS", "BE", "BS", "BL", "AG","FR", "CH"))
-  estimates <- subset(castData, castData$estimated==T & castData$region %in% c("VD", "GE", "TI", "ZH", "VS", "BE", "BS", "BL", "AG","FR", "CH"))
-  
-  pCases <- ggplot(dataCases, aes(x=date)) + 
-    facet_grid(region ~.) +
-    geom_line(aes(y = cumul), color = "black") + 
-    geom_bar(aes(y = incidence), color = "black", stat = "identity", width=0.5) + 
-    scale_x_date(date_breaks = "3 days", 
-                 date_labels = '%b\n%d',
-                 limits = c(as.Date("2020-02-26"), as.Date("2020-04-01"))) + 
-    scale_y_log10() + 
-    ylab("Cumulative (line) and daily (bars) number of confirmed cases") + 
-    xlab("") +
-    theme_bw() + 
-    theme(
-      strip.background = element_blank(),
-      strip.text.y = element_blank(),
-      axis.text.y= element_text(size=12),
-      axis.text.x= element_text(size=11),
-      axis.title.y =  element_text(size=17)
-    )
-  
-  pRe <- ggplot(estimates, aes(x=date)) + 
-    facet_grid(region ~.) +
-    geom_ribbon(aes(ymin=R_lowHPD,ymax=R_highHPD, group=estimate_type, color=estimate_type, fill=estimate_type),alpha=0.3) + 
-    geom_line(aes(y = R_mean, group=estimate_type, color=estimate_type)) +
-    geom_hline(yintercept = 1, linetype="dashed") + 
-    geom_vline(xintercept = c(as.Date("2020-03-14"), as.Date("2020-03-17"), as.Date("2020-03-20")), linetype="dotted") + 
-    geom_vline(xintercept = c(as.Date("2020-03-07")), linetype="dashed") + 
-    annotate("rect", xmin=as.Date("2020-03-14"), xmax=as.Date("2020-03-17"), ymin=-1, ymax=Inf, alpha=0.45, fill="grey") + 
-    scale_x_date(date_breaks = "2 days", 
-                 date_labels = '%b\n%d',
-                 limits = c(as.Date("2020-03-06"), as.Date("2020-03-21"))) + 
-    coord_cartesian(ylim=c(0,4)) +
-    # scale_y_continuous(limits = c(0, maxYscale)) +
-    xlab("") + 
-    ylab("Reproduction number") + 
-    scale_colour_discrete(name  ="Method",
-                          breaks=c("Cori", "WallingaTeunis"),
-                          labels = expression(R(t), R[c](t))) +
-    scale_fill_discrete(name  ="Method",
-                        breaks=c("Cori", "WallingaTeunis"),
-                        labels = expression(R(t), R[c](t))) +
-    theme_bw() + 
-    theme(
-      strip.background = element_blank(),
-      strip.text.y = element_text(size=16),
-      axis.text.y= element_text(size=12),
-      axis.text.x= element_text(size=11),
-      axis.title.y =  element_text(size=17),
-      legend.title = element_text(size=14),
-      legend.text = element_text(size=12)
-    )
-
-  ggarrange(pCases, pRe, labels = c("A", "B"),
-            font.label = list(size = 18),
-            common.legend = TRUE, legend = "right")
-  plotPath <- paste0("./Fig2_Cases_Re_", windowLength, "_day_window_", gsub("-","", Sys.Date()), ".png")
-  ggsave(plotPath, width = 28, height = 40, units = "cm")
-}
-
+### Make plot updated daily on "https://bsse.ethz.ch/cevo/research/sars-cov-2/real-time-monitoring-in-switzerland.html"
 makePlotCumulativeAndDailyCasesAndRe <- function(meltData, windowLength=3) {
   
   meltData <- subset(meltData, meltData$data_type == "confirmed")
@@ -426,10 +456,6 @@ makePlotCumulativeAndDailyCasesAndRe <- function(meltData, windowLength=3) {
   dataCases <- subset(castData, castData$estimated==F & castData$region %in% c("VD", "GE", "TI", "ZH", "VS", "BE", "BS", "BL", "AG","FR", "CH"))
   estimates <- subset(castData, castData$estimated==T & castData$estimate_type=="Cori" & castData$region %in% c("VD", "GE", "TI", "ZH", "VS", "BE", "BS", "BL", "AG","FR", "CH"))
 
-  # dataCases <- subset(castData, castData$estimated==F & castData$region %in% c("CH"))
-  # estimates <- subset(castData, castData$estimated==T & castData$estimate_type=="Cori" & castData$region %in% c("CH"))
-  
-  
   pCases <- ggplot(dataCases, aes(x=date)) + 
     facet_grid(region ~.) +
     geom_line(aes(y = cumul), color = "black") + 
@@ -476,20 +502,30 @@ makePlotCumulativeAndDailyCasesAndRe <- function(meltData, windowLength=3) {
     )
   
   ggarrange(pCases, pRe)
-  plotPath <- paste0("./Re_CH_", gsub("-","", Sys.Date()), ".png")
+  plotPath <- paste0("../plots/Re_CH_", gsub("-","", Sys.Date()), ".png")
   ggsave(plotPath, width = 28, height = 45, units = "cm")
 }
 
 
-## Analysis parms
-window <- 3
 
+#################################
+#### Start of the script ########
+#################################
+
+
+## Set size of sliding window
+window <- 3
 ### Get data
 raw_data <- getAllSwissData(stoppingAfter = as.Date("2020-04-01"))
+### Run EpiEstim
 data <- doAllReEstimations(raw_data, slidingWindow=window)
+
+### rename data columns to make plotting easier
 colnames(data) <- c("date" ,"region", "value" ,"data_type", "variable", "estimate_type")
 
+### make plot for website
 makePlotCumulativeAndDailyCasesAndRe(data, windowLength= window)
 
+### make manuscript figures
 makePlotFigure2(data, windowLength=window)
 makePlotFigure3(data, windowLength=window)

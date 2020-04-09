@@ -1,4 +1,4 @@
-rm(lis=ls())
+rm(list=ls())
 
 library("ggplot2")
 library("lubridate")
@@ -7,8 +7,11 @@ library("EpiEstim")
 library("gridExtra")
 library("reshape2")
 
+
+##### Quick script to plot histogram of delay between symptom onset and testing in BS hospital data
+
 dataSymptoms <- read.csv(sep=";", stringsAsFactors = F,na.strings = c("","NA"),
-                         "./data/Delay_test_symptoms.csv")
+                         "../data/Delay_test_symptoms.csv")
 
 rawDataSymptoms <- dataSymptoms[,-c(1,3)]
 
@@ -32,7 +35,7 @@ ggplot(datesSymptoms, aes(x=timeFromSymptomsToTest)) +
     axis.title.y =  element_text(size=19)
   )
 
-plotPath <- "./Fig1_Histogram_delay_symptoms_to_test_report.png"
+plotPath <- "../plots/Fig1_Histogram_delay_symptoms_to_test_report.png"
 ggsave(plotPath, width = 15, height = 15, units = "cm")
 
 mean(as.numeric(datesSymptoms$timeFromSymptomsToTest)) #5.3 on 91 datapoints
